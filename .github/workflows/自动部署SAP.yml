@@ -1,4 +1,4 @@
-name: 自动部署多账号
+name: 自动部署 SAP（多账号版）
 
 on:
   workflow_dispatch:
@@ -24,15 +24,6 @@ on:
         required: true
         type: boolean
         default: false
-      account:
-        description: '选择部署账号'
-        required: true
-        default: 'account1'
-        type: choice
-        options:
-          - account1
-          - account2
-          - account3
 
 env:
   MEMORY: 256M
@@ -41,7 +32,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
-
+    strategy:
+      matrix:
+        # 在这里添加您的账号配置，每个账号对应一组EMAIL和PASSWORD
+        account: [account1, account2, account3]  # 可以根据需要添加更多账号
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
@@ -63,58 +57,37 @@ jobs:
           echo "DOCKER_IMAGE=ghcr.io/eooce/nodejs:main" >> $GITHUB_ENV
         fi
 
-    - name: 根据账号选择对应的登录密钥
-      id: select_account
-      run: |
-        ACCOUNT="${{ github.event.inputs.account }}"
-        echo "选择的账号: $ACCOUNT"
-        
-        # 设置账号特定的环境变量名后缀
-        if [ "$ACCOUNT" = "account1" ]; then
-          SUFFIX="_ACCOUNT1"
-        elif [ "$ACCOUNT" = "account2" ]; then
-          SUFFIX="_ACCOUNT2"
-        elif [ "$ACCOUNT" = "account3" ]; then
-          SUFFIX="_ACCOUNT3"
-        else
-          SUFFIX=""
-        fi
-        
-        echo "账号后缀: $SUFFIX"
-        echo "ACCOUNT_SUFFIX=$SUFFIX" >> $GITHUB_ENV
-        
-        # 验证必要登录密钥是否存在
-        if [ -z "${{ secrets['EMAIL' + SUFFIX] }}" ] || [ -z "${{ secrets['PASSWORD' + SUFFIX] }}" ]; then
-          echo "错误：账号 $ACCOUNT 的邮箱或密码密钥未设置"
-          exit 1
-        fi
-
     - name: 生成应用名称并设置API端点
       run: |
         if [ "${{ github.event.inputs.region }}" = "SG" ]; then
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="sg$RANDOM_STR"
+          DEFAULT_APP_NAME="sg$RANDOM_STR-${{ matrix.account }}"
         elif [ "${{ github.event.inputs.region }}" = "US" ]; then
           echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="us$RANDOM_STR"
+          DEFAULT_APP_NAME="us$RANDOM_STR-${{ matrix.account }}"
         fi
         
-        # 添加账号标识到应用名称
-        ACCOUNT_PREFIX="${{ github.event.inputs.account }}"
-        APP_NAME_WITH_ACCOUNT="${ACCOUNT_PREFIX}-${DEFAULT_APP_NAME}"
-        
-        echo "APP_NAME=$APP_NAME_WITH_ACCOUNT" >> $GITHUB_ENV
+        echo "APP_NAME=$DEFAULT_APP_NAME" >> $GITHUB_ENV
         echo "将使用API端点: ${{ env.CF_API }}"
-        echo "已自动生成应用名称: $APP_NAME_WITH_ACCOUNT"
+        echo "已自动生成应用名称: $DEFAULT_APP_NAME"
 
     - name: 登录并自动选择组织和空间
       run: |
-        # 使用动态密钥名称获取账号特定的登录信息
-        EMAIL="${{ secrets['EMAIL' + env.ACCOUNT_SUFFIX] }}"
-        PASSWORD="${{ secrets['PASSWORD' + env.ACCOUNT_SUFFIX] }}"
+        # 根据账号标识获取对应的secrets
+        if [ "${{ matrix.account }}" = "account1" ]; then
+          EMAIL="${{ secrets.EMAIL1 }}"
+          PASSWORD="${{ secrets.PASSWORD1 }}"
+        elif [ "${{ matrix.account }}" = "account2" ]; then
+          EMAIL="${{ secrets.EMAIL2 }}"
+          PASSWORD="${{ secrets.PASSWORD2 }}"
+        elif [ "${{ matrix.account }}" = "account3" ]; then
+          EMAIL="${{ secrets.EMAIL3 }}"
+          PASSWORD="${{ secrets.PASSWORD3 }}"
+        fi
         
+        echo "正在使用账号: ${{ matrix.account }}"
         cf login -a ${{ env.CF_API }} -u "$EMAIL" -p "$PASSWORD"
         
         echo "登录成功，开始自动检测组织和空间..."
@@ -155,16 +128,14 @@ jobs:
         echo "目标区域: ${{ github.event.inputs.region }}"
         echo "目标组织: ${{ env.SELECTED_ORG }}"
         echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        echo "部署账号: ${{ github.event.inputs.account }}"
+        echo "当前账号: ${{ matrix.account }}"
         
         cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} --health-check-type port --no-start
 
-    - name: 设置环境变量（使用共用配置）
+    - name: 设置环境变量
       run: |
         echo "为应用 ${{ env.APP_NAME }} 设置环境变量..."
-        echo "使用共用配置信息（UUID、密钥等）"
         
-        # 使用共用的配置信息（不加账号后缀）
         cf set-env ${{ env.APP_NAME }} NAME "SAP"
         cf set-env ${{ env.APP_NAME }} UUID "${{ secrets.UUID }}"
         cf set-env ${{ env.APP_NAME }} NEZHA_SERVER "${{ secrets.NEZHA_SERVER }}"
@@ -175,7 +146,6 @@ jobs:
         cf set-env ${{ env.APP_NAME }} BOT_TOKEN "${{ secrets.BOT_TOKEN }}"
         cf set-env ${{ env.APP_NAME }} ARGO_PORT "${{ secrets.ARGO_PORT }}"
 
-        # 处理 ARGO_AUTH 逻辑（使用共用配置）
         if echo "${{ secrets.ARGO_AUTH }}" | grep -q '\n'; then
           echo "检测到组合格式的 ARGO_AUTH，将自动解析域名和Token..."
           ARGO_DOMAIN_VALUE=$(echo "${{ secrets.ARGO_AUTH }}" | head -n 1)
@@ -232,7 +202,7 @@ jobs:
         
         echo "----------------------------------------"
         echo "部署成功！详细信息如下："
-        echo "账号 (Account): ${{ github.event.inputs.account }}"
+        echo "账号标识: ${{ matrix.account }}"
         echo "区域 (Region): ${{ github.event.inputs.region }}"
         echo "组织 (ORG): ${{ env.SELECTED_ORG }}"
         echo "空间 (SPACE): ${{ env.SELECTED_SPACE }}"
