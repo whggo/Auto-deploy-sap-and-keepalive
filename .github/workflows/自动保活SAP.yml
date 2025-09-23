@@ -1,283 +1,212 @@
-name: 自动保活 SAP
+import os
+import requests
+import time
+import logging
+from typing import List, Dict
 
-on:
-  schedule:
-    - cron: '15 23 * * *'      
-  workflow_dispatch:          # 允许手动触发
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-jobs:
-  restart-sg-apps:
-    runs-on: ubuntu-latest
-    name: 重启新加坡(SG)区域应用
-    if: always()
-    continue-on-error: true
-    timeout-minutes: 120 
-    steps:
-    - name: 检出代码
-      uses: actions/checkout@v4
-
-    - name: 安装 CF CLI
-      run: |
-        wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
-        echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
-        sudo apt-get update
-        sudo apt-get install -y cf8-cli
-
-    - name: 设置 SG 区域 API 端点
-      run: |
-        echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
-        echo "使用API端点: $CF_API (区域: SG)"
-
-    - name: 登录并自动检测组织和空间
-      run: |
-        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
-        echo "自动检测SG区域可用的组织和空间..."
-        SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
-        if [ -z "$SELECTED_ORG" ]; then echo "错误: 未找到可用的组织"; exit 1; fi
-        cf target -o "$SELECTED_ORG"
-        SELECTED_SPACE=$(cf spaces | grep -v "^name$" | grep -v "^Getting spaces" | grep -v "^$" | head -n 1 | awk '{print $1}')
-        if [ -z "$SELECTED_SPACE" ]; then echo "错误: 未找到可用的空间"; exit 1; fi
-        cf target -s "$SELECTED_SPACE"
-        echo "当前SG区域目标:"
-        cf target
-
-    - name: '[仅定时任务] 等待 UTC 00:00 开始任务'
-      if: github.event_name == 'schedule'
-      run: |
-        echo "等待 UTC 时间到达 00:00 以开始重启流程..."
-        target_time="00:00"
-        deadline_time="01:00"
-
-        while true; do
-          date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
-          if [ -z "$date_header" ]; then
-            echo "无法获取 ntp.org 时间，15秒后重试..."
-            sleep 15
-            continue
-          fi
-
-          current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
-          current_hour=$(echo "$current_time" | cut -c 1-2)
-          
-          if [[ "$current_hour" == "23" ]]; then
-            echo "等待午夜... 当前 UTC 时间: $current_time"
-            sleep 60
-            continue
-          fi
-
-          if [[ "$current_time" > "$deadline_time" ]]; then
-            echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
-            exit 1
-          fi
-
-          if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
-            echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
-            break
-          fi
-          
-          echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
-          sleep 60
-        done
-
-    - name: 等待应用自行停止后，再尝试启动(直至成功)
-      run: |
-        apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
-        if [ -z "$apps" ]; then
-          echo "在SG区域中未发现任何应用，无需操作。"
-          exit 0
-        fi
+class AccountKeeper:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+    
+    def extract_accounts_from_variables(self) -> List[Dict[str, str]]:
+        """
+        从环境变量中提取所有账号信息
+        变量格式：ACCOUNT1_EMAIL, ACCOUNT1_PASSWORD, ACCOUNT2_EMAIL, ACCOUNT2_PASSWORD, 等等
+        """
+        accounts = []
+        i = 1
         
-        echo "发现应用列表:"
-        echo "$apps"
+        while True:
+            email_var = f"ACCOUNT{i}_EMAIL"
+            password_var = f"ACCOUNT{i}_PASSWORD"
+            
+            email = os.getenv(email_var)
+            password = os.getenv(password_var)
+            
+            # 如果找不到对应序号的变量，停止搜索
+            if not email or not password:
+                if i == 1:
+                    logger.warning("未找到账号信息，请检查环境变量设置")
+                break
+            
+            accounts.append({
+                'email': email,
+                'password': password,
+                'account_id': i
+            })
+            logger.info(f"成功加载账号 {i}: {email}")
+            i += 1
         
-        for app in $apps; do
-          echo "----------------------------------------"
-          echo "开始处理应用: $app"
-          
-          # 步骤 1: 等待应用自行停止
-          echo "等待应用 $app 自行停止..."
-          wait_timeout=3600 # 1小时的等待超时
-          elapsed=0
-          is_stopped=false
-          while [[ $elapsed -lt $wait_timeout ]]; do
-            if [[ "$(cf app "$app" | grep 'requested state:' | awk '{print $3}')" != "started" ]]; then
-              echo "应用 $app 已确认停止。"
-              is_stopped=true
-              break
-            fi
-            echo "应用 $app 仍在运行，15秒后再次检查..."
-            sleep 15
-            elapsed=$((elapsed + 15))
-          done
+        return accounts
+    
+    def login(self, email: str, password: str) -> bool:
+        """
+        模拟登录操作
+        这里需要根据实际网站的登录接口进行修改
+        """
+        try:
+            # 示例登录请求 - 需要根据实际网站修改
+            login_data = {
+                'email': email,
+                'password': password,
+                'remember_me': True
+            }
+            
+            # 这里替换为实际的登录URL
+            response = self.session.post('https://example.com/api/login', json=login_data)
+            
+            if response.status_code == 200:
+                logger.info(f"登录成功: {email}")
+                return True
+            else:
+                logger.error(f"登录失败 {email}: HTTP {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"登录异常 {email}: {str(e)}")
+            return False
+    
+    def keep_alive(self, account: Dict[str, str]) -> bool:
+        """
+        保活操作 - 模拟用户活动
+        """
+        try:
+            # 示例保活操作 - 需要根据实际需求修改
+            activities = [
+                self.check_notifications,
+                self.refresh_profile,
+                self.make_dummy_request
+            ]
+            
+            success_count = 0
+            for activity in activities:
+                if activity(account):
+                    success_count += 1
+                time.sleep(2)  # 间隔2秒执行下一个操作
+            
+            return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"保活操作异常 {account['email']}: {str(e)}")
+            return False
+    
+    def check_notifications(self, account: Dict[str, str]) -> bool:
+        """
+        检查通知 - 示例保活操作1
+        """
+        try:
+            response = self.session.get('https://example.com/api/notifications')
+            return response.status_code == 200
+        except:
+            return False
+    
+    def refresh_profile(self, account: Dict[str, str]) -> bool:
+        """
+        刷新个人资料 - 示例保活操作2
+        """
+        try:
+            response = self.session.get('https://example.com/api/profile')
+            return response.status_code == 200
+        except:
+            return False
+    
+    def make_dummy_request(self, account: Dict[str, str]) -> bool:
+        """
+        发送虚拟请求 - 示例保活操作3
+        """
+        try:
+            response = self.session.get('https://example.com/api/ping')
+            return response.status_code == 200
+        except:
+            return False
+    
+    def logout(self, account: Dict[str, str]):
+        """
+        登出操作（可选）
+        """
+        try:
+            self.session.post('https://example.com/api/logout')
+            logger.info(f"已登出: {account['email']}")
+        except Exception as e:
+            logger.error(f"登出异常 {account['email']}: {str(e)}")
+    
+    def run_keep_alive_for_account(self, account: Dict[str, str]):
+        """
+        为单个账号执行保活流程
+        """
+        logger.info(f"开始处理账号 {account['account_id']}: {account['email']}")
+        
+        # 登录
+        if self.login(account['email'], account['password']):
+            # 执行保活操作
+            if self.keep_alive(account):
+                logger.info(f"账号 {account['email']} 保活成功")
+            else:
+                logger.warning(f"账号 {account['email']} 保活操作部分失败")
+            
+            # 可选：登出
+            # self.logout(account)
+        else:
+            logger.error(f"账号 {account['email']} 登录失败，跳过保活")
+    
+    def run(self, interval_minutes: int = 60):
+        """
+        主循环，定期为所有账号执行保活
+        """
+        logger.info("开始多账号保活服务")
+        
+        while True:
+            try:
+                # 每次循环都重新获取账号信息（支持动态更新）
+                accounts = self.extract_accounts_from_variables()
+                
+                if not accounts:
+                    logger.warning("未找到任何账号信息，等待下次循环")
+                    time.sleep(interval_minutes * 60)
+                    continue
+                
+                logger.info(f"本轮处理 {len(accounts)} 个账号")
+                
+                # 为每个账号执行保活
+                for account in accounts:
+                    try:
+                        self.run_keep_alive_for_account(account)
+                        
+                        # 账号间间隔
+                        time.sleep(5)
+                        
+                    except Exception as e:
+                        logger.error(f"处理账号 {account['email']} 时发生异常: {str(e)}")
+                        continue
+                
+                logger.info(f"本轮保活完成，等待 {interval_minutes} 分钟后继续")
+                time.sleep(interval_minutes * 60)
+                
+            except KeyboardInterrupt:
+                logger.info("收到中断信号，停止服务")
+                break
+            except Exception as e:
+                logger.error(f"主循环发生异常: {str(e)}")
+                time.sleep(60)  # 异常后等待1分钟再继续
 
-          if [[ "$is_stopped" == "false" ]]; then
-            echo "错误: 等待应用 $app 自行停止超时 (1小时)。跳过此应用。"
-            continue
-          fi
+def main():
+    """主函数"""
+    keeper = AccountKeeper()
+    
+    # 设置保活间隔（分钟）
+    interval = int(os.getenv('KEEP_ALIVE_INTERVAL', '60'))
+    
+    try:
+        keeper.run(interval_minutes=interval)
+    except Exception as e:
+        logger.error(f"服务运行异常: {str(e)}")
 
-          # 步骤 2: 无限次尝试启动应用，直到成功
-          echo "开始启动应用: $app"
-          attempt=1
-          while true; do
-            echo "正在进行第 $attempt 次启动尝试..."
-            if cf start "$app"; then
-              echo "应用 $app 成功启动。"
-              break # 成功则跳出循环
-            else
-              echo "启动失败。将在 1 分钟后重试..."
-              sleep 60
-            fi
-            ((attempt++))
-          done
-          
-          # 步骤 3: 输出应用URL
-          app_url=$(cf app "$app" | grep "urls:" | awk '{print $2}')
-          if [ -n "$app_url" ]; then
-            echo "应用 $app 的访问地址是: $app_url"
-          fi
-        done
-
-        echo "----------------------------------------"
-        echo "成功: SG区域所有应用均已处理完毕。"
-
-    - name: 验证最终应用状态
-      run: |
-        echo "验证SG区域最终应用状态..."
-        cf apps
-
-  restart-us-apps:
-    runs-on: ubuntu-latest
-    name: 重启美国(US)区域应用
-    if: always()
-    continue-on-error: true
-    timeout-minutes: 120 # 
-    steps:
-    - name: 检出代码
-      uses: actions/checkout@v4
-
-    - name: 安装 CF CLI
-      run: |
-        wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
-        echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
-        sudo apt-get update
-        sudo apt-get install -y cf8-cli
-
-    - name: 设置 US 区域 API 端点
-      run: |
-        echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
-        echo "使用API端点: $CF_API (区域: US)"
-
-    - name: 登录并自动检测组织和空间
-      run: |
-        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
-        echo "自动检测US区域可用的组织和空间..."
-        SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
-        if [ -z "$SELECTED_ORG" ]; then echo "错误: 未找到可用的组织"; exit 1; fi
-        cf target -o "$SELECTED_ORG"
-        SELECTED_SPACE=$(cf spaces | grep -v "^name$" | grep -v "^Getting spaces" | grep -v "^$" | head -n 1 | awk '{print $1}')
-        if [ -z "$SELECTED_SPACE" ]; then echo "错误: 未找到可用的空间"; exit 1; fi
-        cf target -s "$SELECTED_SPACE"
-        echo "当前US区域目标:"
-        cf target
-
-    - name: '[仅定时任务] 等待 UTC 00:00 开始任务'
-      if: github.event_name == 'schedule'
-      run: |
-        echo "等待 UTC 时间到达 00:00 以开始重启流程..."
-        target_time="00:00"
-        deadline_time="01:00"
-
-        while true; do
-          date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
-          if [ -z "$date_header" ]; then
-            echo "无法获取 ntp.org 时间，15秒后重试..."
-            sleep 15
-            continue
-          fi
-
-          current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
-          current_hour=$(echo "$current_time" | cut -c 1-2)
-          
-          if [[ "$current_hour" == "23" ]]; then
-            echo "等待午夜... 当前 UTC 时间: $current_time"
-            sleep 60
-            continue
-          fi
-
-          if [[ "$current_time" > "$deadline_time" ]]; then
-            echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
-            exit 1
-          fi
-
-          if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
-            echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
-            break
-          fi
-          
-          echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
-          sleep 60
-        done
-
-    - name: 等待应用自行停止后，再尝试启动(直至成功)
-      run: |
-        apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
-        if [ -z "$apps" ]; then
-          echo "在US区域中未发现任何应用，无需操作。"
-          exit 0
-        fi
-
-        echo "发现应用列表:"
-        echo "$apps"
-
-        for app in $apps; do
-          echo "----------------------------------------"
-          echo "开始处理应用: $app"
-          
-          echo "等待应用 $app 自行停止..."
-          wait_timeout=3600 # 1小时的等待超时
-          elapsed=0
-          is_stopped=false
-          while [[ $elapsed -lt $wait_timeout ]]; do
-            if [[ "$(cf app "$app" | grep 'requested state:' | awk '{print $3}')" != "started" ]]; then
-              echo "应用 $app 已确认停止。"
-              is_stopped=true
-              break
-            fi
-            echo "应用 $app 仍在运行，15秒后再次检查..."
-            sleep 15
-            elapsed=$((elapsed + 15))
-          done
-
-          if [[ "$is_stopped" == "false" ]]; then
-            echo "错误: 等待应用 $app 自行停止超时 (1小时)。跳过此应用。"
-            continue
-          fi
-
-          echo "开始启动应用: $app"
-          attempt=1
-          while true; do
-            echo "正在进行第 $attempt 次启动尝试..."
-            if cf start "$app"; then
-              echo "应用 $app 成功启动。"
-              break
-            else
-              echo "启动失败。将在 1 分钟后重试..."
-              sleep 60
-            fi
-            ((attempt++))
-          done
-
-          # 步骤 3: 输出应用URL
-          app_url=$(cf app "$app" | grep "urls:" | awk '{print $2}')
-          if [ -n "$app_url" ]; then
-            echo "应用 $app 的访问地址是: $app_url"
-          fi
-        done
-
-        echo "----------------------------------------"
-        echo "成功: US区域所有应用均已处理完毕。"
-
-    - name: 验证最终应用状态
-      run: |
-        echo "验证US区域最终应用状态..."
-        cf apps
+if __name__ == "__main__":
+    main()
