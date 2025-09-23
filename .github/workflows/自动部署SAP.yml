@@ -69,13 +69,17 @@ jobs:
         ACCOUNT="${{ github.event.inputs.account }}"
         echo "选择的账号: $ACCOUNT"
         
-        # 设置账号特定的变量名
-        EMAIL_VAR="${ACCOUNT}_EMAIL"
-        PASSWORD_VAR="${ACCOUNT}_PASSWORD"
+        # 转换为大写，因为GitHub Variables通常使用大写
+        ACCOUNT_UPPER=$(echo "$ACCOUNT" | tr '[:lower:]' '[:upper:]')
+        
+        # 设置账号特定的变量名（使用大写）
+        EMAIL_VAR="${ACCOUNT_UPPER}_EMAIL"
+        PASSWORD_VAR="${ACCOUNT_UPPER}_PASSWORD"
         
         echo "EMAIL_VAR=$EMAIL_VAR" >> $GITHUB_ENV
         echo "PASSWORD_VAR=$PASSWORD_VAR" >> $GITHUB_ENV
         echo "ACCOUNT=$ACCOUNT" >> $GITHUB_ENV
+        echo "ACCOUNT_UPPER=$ACCOUNT_UPPER" >> $GITHUB_ENV
 
     - name: 生成应用名称并设置API端点
       run: |
@@ -102,18 +106,20 @@ jobs:
         ACCOUNT3_EMAIL: ${{ vars.ACCOUNT3_EMAIL }}
         ACCOUNT3_PASSWORD: ${{ vars.ACCOUNT3_PASSWORD }}
       run: |
-        # 从环境变量中获取账号信息
-        EMAIL_VAR_NAME="${ACCOUNT}_EMAIL"
-        PASSWORD_VAR_NAME="${ACCOUNT}_PASSWORD"
+        # 从环境变量中获取账号信息（使用大写变量名）
+        EMAIL_VAR_NAME="${{ env.ACCOUNT_UPPER }}_EMAIL"
+        PASSWORD_VAR_NAME="${{ env.ACCOUNT_UPPER }}_PASSWORD"
+        
+        echo "正在查找变量: $EMAIL_VAR_NAME 和 $PASSWORD_VAR_NAME"
         
         # 使用间接引用获取变量值
         EMAIL="${!EMAIL_VAR_NAME}"
         PASSWORD="${!PASSWORD_VAR_NAME}"
         
         if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
-          echo "错误：未找到账号 $ACCOUNT 的登录信息"
-          echo "请确保在仓库变量中设置了 ${EMAIL_VAR_NAME} 和 ${PASSWORD_VAR_NAME}"
-          echo "当前设置的变量："
+          echo "错误：未找到账号 ${{ env.ACCOUNT }} 的登录信息"
+          echo "请确保在仓库Variables中设置了 $EMAIL_VAR_NAME 和 $PASSWORD_VAR_NAME"
+          echo "当前可用的变量："
           echo "ACCOUNT1_EMAIL: ${ACCOUNT1_EMAIL:0:3}***"  # 只显示前3个字符
           echo "ACCOUNT2_EMAIL: ${ACCOUNT2_EMAIL:0:3}***"
           echo "ACCOUNT3_EMAIL: ${ACCOUNT3_EMAIL:0:3}***"
