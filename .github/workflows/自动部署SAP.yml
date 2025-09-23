@@ -94,18 +94,34 @@ jobs:
         echo "已自动生成应用名称: $DEFAULT_APP_NAME"
 
     - name: 登录并自动选择组织和空间
+      env:
+        ACCOUNT1_EMAIL: ${{ vars.ACCOUNT1_EMAIL }}
+        ACCOUNT1_PASSWORD: ${{ vars.ACCOUNT1_PASSWORD }}
+        ACCOUNT2_EMAIL: ${{ vars.ACCOUNT2_EMAIL }}
+        ACCOUNT2_PASSWORD: ${{ vars.ACCOUNT2_PASSWORD }}
+        ACCOUNT3_EMAIL: ${{ vars.ACCOUNT3_EMAIL }}
+        ACCOUNT3_PASSWORD: ${{ vars.ACCOUNT3_PASSWORD }}
       run: |
-        # 从变量中获取账号信息
-        EMAIL="${{ vars[env.EMAIL_VAR] }}"
-        PASSWORD="${{ vars[env.PASSWORD_VAR] }}"
+        # 从环境变量中获取账号信息
+        EMAIL_VAR_NAME="${ACCOUNT}_EMAIL"
+        PASSWORD_VAR_NAME="${ACCOUNT}_PASSWORD"
+        
+        # 使用间接引用获取变量值
+        EMAIL="${!EMAIL_VAR_NAME}"
+        PASSWORD="${!PASSWORD_VAR_NAME}"
         
         if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
-          echo "错误：未找到账号 ${{ env.ACCOUNT }} 的登录信息"
-          echo "请确保在仓库变量中设置了 ${{ env.EMAIL_VAR }} 和 ${{ env.PASSWORD_VAR }}"
+          echo "错误：未找到账号 $ACCOUNT 的登录信息"
+          echo "请确保在仓库变量中设置了 ${EMAIL_VAR_NAME} 和 ${PASSWORD_VAR_NAME}"
+          echo "当前设置的变量："
+          echo "ACCOUNT1_EMAIL: ${ACCOUNT1_EMAIL:0:3}***"  # 只显示前3个字符
+          echo "ACCOUNT2_EMAIL: ${ACCOUNT2_EMAIL:0:3}***"
+          echo "ACCOUNT3_EMAIL: ${ACCOUNT3_EMAIL:0:3}***"
           exit 1
         fi
         
-        echo "使用账号: $EMAIL"
+        echo "使用账号: ${EMAIL:0:3}***"  # 保护隐私，只显示部分邮箱
+        
         cf login -a ${{ env.CF_API }} -u "$EMAIL" -p "$PASSWORD"
         
         echo "登录成功，开始自动检测组织和空间..."
