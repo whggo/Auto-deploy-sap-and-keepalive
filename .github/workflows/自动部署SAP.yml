@@ -1,4 +1,4 @@
-name: 自动部署 SAP（多账号版）
+name: 自动部署 SAP
 
 on:
   workflow_dispatch:
@@ -24,6 +24,15 @@ on:
         required: true
         type: boolean
         default: false
+      account:
+        description: '选择部署账号'
+        required: true
+        default: 'account1'
+        type: choice
+        options:
+          - account1
+          - account2
+          - account3
 
 env:
   MEMORY: 256M
@@ -32,10 +41,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment }}
-    strategy:
-      matrix:
-        # 在这里添加您的账号配置，每个账号对应一组EMAIL和PASSWORD
-        account: [account1, account2, account3]  # 可以根据需要添加更多账号
+
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
@@ -57,16 +63,30 @@ jobs:
           echo "DOCKER_IMAGE=ghcr.io/eooce/nodejs:main" >> $GITHUB_ENV
         fi
 
+    - name: 设置账号相关变量
+      id: set_account_vars
+      run: |
+        ACCOUNT="${{ github.event.inputs.account }}"
+        echo "选择的账号: $ACCOUNT"
+        
+        # 设置账号特定的变量名
+        EMAIL_VAR="${ACCOUNT}_EMAIL"
+        PASSWORD_VAR="${ACCOUNT}_PASSWORD"
+        
+        echo "EMAIL_VAR=$EMAIL_VAR" >> $GITHUB_ENV
+        echo "PASSWORD_VAR=$PASSWORD_VAR" >> $GITHUB_ENV
+        echo "ACCOUNT=$ACCOUNT" >> $GITHUB_ENV
+
     - name: 生成应用名称并设置API端点
       run: |
         if [ "${{ github.event.inputs.region }}" = "SG" ]; then
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="sg$RANDOM_STR-${{ matrix.account }}"
+          DEFAULT_APP_NAME="${ACCOUNT}-sg$RANDOM_STR"
         elif [ "${{ github.event.inputs.region }}" = "US" ]; then
           echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="us$RANDOM_STR-${{ matrix.account }}"
+          DEFAULT_APP_NAME="${ACCOUNT}-us$RANDOM_STR"
         fi
         
         echo "APP_NAME=$DEFAULT_APP_NAME" >> $GITHUB_ENV
@@ -75,19 +95,17 @@ jobs:
 
     - name: 登录并自动选择组织和空间
       run: |
-        # 根据账号标识获取对应的secrets
-        if [ "${{ matrix.account }}" = "account1" ]; then
-          EMAIL="${{ secrets.EMAIL1 }}"
-          PASSWORD="${{ secrets.PASSWORD1 }}"
-        elif [ "${{ matrix.account }}" = "account2" ]; then
-          EMAIL="${{ secrets.EMAIL2 }}"
-          PASSWORD="${{ secrets.PASSWORD2 }}"
-        elif [ "${{ matrix.account }}" = "account3" ]; then
-          EMAIL="${{ secrets.EMAIL3 }}"
-          PASSWORD="${{ secrets.PASSWORD3 }}"
+        # 从变量中获取账号信息
+        EMAIL="${{ vars[env.EMAIL_VAR] }}"
+        PASSWORD="${{ vars[env.PASSWORD_VAR] }}"
+        
+        if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
+          echo "错误：未找到账号 ${{ env.ACCOUNT }} 的登录信息"
+          echo "请确保在仓库变量中设置了 ${{ env.EMAIL_VAR }} 和 ${{ env.PASSWORD_VAR }}"
+          exit 1
         fi
         
-        echo "正在使用账号: ${{ matrix.account }}"
+        echo "使用账号: $EMAIL"
         cf login -a ${{ env.CF_API }} -u "$EMAIL" -p "$PASSWORD"
         
         echo "登录成功，开始自动检测组织和空间..."
@@ -128,7 +146,7 @@ jobs:
         echo "目标区域: ${{ github.event.inputs.region }}"
         echo "目标组织: ${{ env.SELECTED_ORG }}"
         echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        echo "当前账号: ${{ matrix.account }}"
+        echo "使用账号: ${{ env.ACCOUNT }}"
         
         cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} --health-check-type port --no-start
 
@@ -202,7 +220,7 @@ jobs:
         
         echo "----------------------------------------"
         echo "部署成功！详细信息如下："
-        echo "账号标识: ${{ matrix.account }}"
+        echo "账号 (Account): ${{ env.ACCOUNT }}"
         echo "区域 (Region): ${{ github.event.inputs.region }}"
         echo "组织 (ORG): ${{ env.SELECTED_ORG }}"
         echo "空间 (SPACE): ${{ env.SELECTED_SPACE }}"
