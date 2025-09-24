@@ -11,6 +11,11 @@ on:
         options:
           - SG
           - US
+      account_selection:
+        description: '选择要删除应用的账号 (输入账号编号，如 1,2,3 或 all 表示所有账号)'
+        required: true
+        default: 'all'
+        type: string
       confirmation:
         description: '此操作不可逆！请输入 "确认删除" 来执行。'
         required: true
@@ -19,7 +24,7 @@ on:
 jobs:
   delete-apps:
     runs-on: ubuntu-latest
-    name: 从区域 ${{ github.event.inputs.region }} 删除所有账号的应用
+    name: 从区域 ${{ github.event.inputs.region }} 删除指定账号的应用
     
     steps:
     - name: 验证操作确认
@@ -71,8 +76,42 @@ jobs:
           exit 1
         fi
         
-        echo "找到 ${#accounts[@]} 个账号"
+        echo "找到 ${#accounts[@]} 个账号: ${accounts[*]}"
         echo "accounts=${accounts[*]}" >> $GITHUB_OUTPUT
+
+    - name: 处理账号选择
+      id: select-accounts
+      run: |
+        all_accounts=(${{ steps.get-accounts.outputs.accounts }})
+        user_input="${{ github.event.inputs.account_selection }}"
+        
+        # 如果输入是 "all"，选择所有账号
+        if [ "$user_input" = "all" ]; then
+          selected_accounts=("${all_accounts[@]}")
+          echo "选择了所有账号: ${selected_accounts[*]}"
+        else
+          # 处理用户输入的账号编号（支持逗号分隔或空格分隔）
+          IFS=', ' read -ra user_selected <<< "$user_input"
+          selected_accounts=()
+          
+          for account_num in "${user_selected[@]}"; do
+            # 验证账号编号是否有效
+            if [[ " ${all_accounts[@]} " =~ " ${account_num} " ]]; then
+              selected_accounts+=("$account_num")
+            else
+              echo "警告：账号 $account_num 不存在，已跳过"
+            fi
+          done
+          
+          if [ ${#selected_accounts[@]} -eq 0 ]; then
+            echo "错误：没有选择有效的账号"
+            exit 1
+          fi
+          
+          echo "选择的账号: ${selected_accounts[*]}"
+        fi
+        
+        echo "selected_accounts=${selected_accounts[*]}" >> $GITHUB_OUTPUT
 
     - name: 循环处理每个账号
       env:
@@ -87,9 +126,14 @@ jobs:
         ACCOUNT5_EMAIL: ${{ vars.ACCOUNT5_EMAIL }}
         ACCOUNT5_PASSWORD: ${{ vars.ACCOUNT5_PASSWORD }}
       run: |
-        accounts=(${{ steps.get-accounts.outputs.accounts }})
+        selected_accounts=(${{ steps.select-accounts.outputs.selected_accounts }})
         
-        for account_num in "${accounts[@]}"; do
+        echo "========================================"
+        echo "开始处理选中的账号: ${selected_accounts[*]}"
+        echo "区域: ${{ github.event.inputs.region }}"
+        echo "========================================"
+        
+        for account_num in "${selected_accounts[@]}"; do
           email_var="ACCOUNT${account_num}_EMAIL"
           password_var="ACCOUNT${account_num}_PASSWORD"
           
@@ -151,6 +195,7 @@ jobs:
     - name: 完成总结
       run: |
         echo "========================================"
-        echo "所有账号的处理已完成"
+        echo "所有选中账号的处理已完成"
         echo "区域: ${{ github.event.inputs.region }}"
+        echo "处理的账号: ${{ github.event.inputs.account_selection }}"
         echo "========================================"
