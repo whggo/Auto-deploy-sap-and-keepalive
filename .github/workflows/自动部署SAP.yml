@@ -24,15 +24,6 @@ on:
         required: true
         type: boolean
         default: false
-      account:
-        description: '选择部署账号'
-        required: true
-        default: 'account1'
-        type: choice
-        options:
-          - account1
-          - account2
-          - account3
 
 env:
   MEMORY: 256M
@@ -56,41 +47,23 @@ jobs:
     - name: 根据输入选择Docker镜像
       run: |
         if [ "${{ github.event.inputs.is_direct_connect }}" = "true" ]; then
-          echo "已选择"直连镜像"，使用 ghcr.io/eooce/ws:latest"
+          echo "已选择“直连镜像”，使用 ghcr.io/eooce/ws:latest"
           echo "DOCKER_IMAGE=ghcr.io/eooce/ws:latest" >> $GITHUB_ENV
         else
-          echo "未选择"直连镜像"，使用默认的 ghcr.io/eooce/nodejs:main"
+          echo "未选择“直连镜像”，使用默认的 ghcr.io/eooce/nodejs:main"
           echo "DOCKER_IMAGE=ghcr.io/eooce/nodejs:main" >> $GITHUB_ENV
         fi
-
-    - name: 设置账号相关变量
-      id: set_account_vars
-      run: |
-        ACCOUNT="${{ github.event.inputs.account }}"
-        echo "选择的账号: $ACCOUNT"
-        
-        # 转换为大写，因为GitHub Variables通常使用大写
-        ACCOUNT_UPPER=$(echo "$ACCOUNT" | tr '[:lower:]' '[:upper:]')
-        
-        # 设置账号特定的变量名（使用大写）
-        EMAIL_VAR="${ACCOUNT_UPPER}_EMAIL"
-        PASSWORD_VAR="${ACCOUNT_UPPER}_PASSWORD"
-        
-        echo "EMAIL_VAR=$EMAIL_VAR" >> $GITHUB_ENV
-        echo "PASSWORD_VAR=$PASSWORD_VAR" >> $GITHUB_ENV
-        echo "ACCOUNT=$ACCOUNT" >> $GITHUB_ENV
-        echo "ACCOUNT_UPPER=$ACCOUNT_UPPER" >> $GITHUB_ENV
 
     - name: 生成应用名称并设置API端点
       run: |
         if [ "${{ github.event.inputs.region }}" = "SG" ]; then
           echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="${ACCOUNT}-sg$RANDOM_STR"
+          DEFAULT_APP_NAME="sg$RANDOM_STR"
         elif [ "${{ github.event.inputs.region }}" = "US" ]; then
           echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
           RANDOM_STR=$(head /dev/urandom | tr -dc 'a-z' | head -c 6)
-          DEFAULT_APP_NAME="${ACCOUNT}-us$RANDOM_STR"
+          DEFAULT_APP_NAME="us$RANDOM_STR"
         fi
         
         echo "APP_NAME=$DEFAULT_APP_NAME" >> $GITHUB_ENV
@@ -98,37 +71,8 @@ jobs:
         echo "已自动生成应用名称: $DEFAULT_APP_NAME"
 
     - name: 登录并自动选择组织和空间
-      env:
-        ACCOUNT1_EMAIL: ${{ vars.ACCOUNT1_EMAIL }}
-        ACCOUNT1_PASSWORD: ${{ vars.ACCOUNT1_PASSWORD }}
-        ACCOUNT2_EMAIL: ${{ vars.ACCOUNT2_EMAIL }}
-        ACCOUNT2_PASSWORD: ${{ vars.ACCOUNT2_PASSWORD }}
-        ACCOUNT3_EMAIL: ${{ vars.ACCOUNT3_EMAIL }}
-        ACCOUNT3_PASSWORD: ${{ vars.ACCOUNT3_PASSWORD }}
       run: |
-        # 从环境变量中获取账号信息（使用大写变量名）
-        EMAIL_VAR_NAME="${{ env.ACCOUNT_UPPER }}_EMAIL"
-        PASSWORD_VAR_NAME="${{ env.ACCOUNT_UPPER }}_PASSWORD"
-        
-        echo "正在查找变量: $EMAIL_VAR_NAME 和 $PASSWORD_VAR_NAME"
-        
-        # 使用间接引用获取变量值
-        EMAIL="${!EMAIL_VAR_NAME}"
-        PASSWORD="${!PASSWORD_VAR_NAME}"
-        
-        if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
-          echo "错误：未找到账号 ${{ env.ACCOUNT }} 的登录信息"
-          echo "请确保在仓库Variables中设置了 $EMAIL_VAR_NAME 和 $PASSWORD_VAR_NAME"
-          echo "当前可用的变量："
-          echo "ACCOUNT1_EMAIL: ${ACCOUNT1_EMAIL:0:3}***"  # 只显示前3个字符
-          echo "ACCOUNT2_EMAIL: ${ACCOUNT2_EMAIL:0:3}***"
-          echo "ACCOUNT3_EMAIL: ${ACCOUNT3_EMAIL:0:3}***"
-          exit 1
-        fi
-        
-        echo "使用账号: ${EMAIL:0:3}***"  # 保护隐私，只显示部分邮箱
-        
-        cf login -a ${{ env.CF_API }} -u "$EMAIL" -p "$PASSWORD"
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         
         echo "登录成功，开始自动检测组织和空间..."
         
@@ -168,7 +112,6 @@ jobs:
         echo "目标区域: ${{ github.event.inputs.region }}"
         echo "目标组织: ${{ env.SELECTED_ORG }}"
         echo "目标空间: ${{ env.SELECTED_SPACE }}"
-        echo "使用账号: ${{ env.ACCOUNT }}"
         
         cf push ${{ env.APP_NAME }} --docker-image ${{ env.DOCKER_IMAGE }} -m ${{ env.MEMORY }} --health-check-type port --no-start
 
@@ -206,7 +149,7 @@ jobs:
         cf set-env ${{ env.APP_NAME }} CFIP "$CFIP_VALUE"
         
         if [ "${{ github.event.inputs.is_direct_connect }}" = "true" ]; then
-          echo "已选择"直连镜像"模式，开始自动配置 DOMAIN 环境变量..."
+          echo "已选择“直连镜像”模式，开始自动配置 DOMAIN 环境变量..."
           ROUTE=$(cf app ${{ env.APP_NAME }} | grep "routes:" | awk '{print $2}')
           if [ -n "$ROUTE" ]; then
             echo "已设置 DOMAIN 环境变量为: $ROUTE"
@@ -242,7 +185,6 @@ jobs:
         
         echo "----------------------------------------"
         echo "部署成功！详细信息如下："
-        echo "账号 (Account): ${{ env.ACCOUNT }}"
         echo "区域 (Region): ${{ github.event.inputs.region }}"
         echo "组织 (ORG): ${{ env.SELECTED_ORG }}"
         echo "空间 (SPACE): ${{ env.SELECTED_SPACE }}"
