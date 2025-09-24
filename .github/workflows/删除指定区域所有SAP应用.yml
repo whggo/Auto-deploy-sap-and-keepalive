@@ -1,4 +1,4 @@
-name: 删除多个账号指定区域所有SAP应用
+name: 删除指定区域所有SAP应用
 
 on:
   workflow_dispatch:
@@ -11,11 +11,6 @@ on:
         options:
           - SG
           - US
-      account_selection:
-        description: '选择要删除应用的账号 (输入账号编号，如 1,2,3 或 all 表示所有账号)'
-        required: true
-        default: 'all'
-        type: string
       confirmation:
         description: '此操作不可逆！请输入 "确认删除" 来执行。'
         required: true
@@ -24,7 +19,7 @@ on:
 jobs:
   delete-apps:
     runs-on: ubuntu-latest
-    name: 从区域 ${{ github.event.inputs.region }} 删除指定账号的应用
+    name: 从区域 ${{ github.event.inputs.region }} 删除所有应用
     
     steps:
     - name: 验证操作确认
@@ -51,151 +46,41 @@ jobs:
           echo "使用美国(US)区域"
         fi
 
-    - name: 获取账号列表
-      id: get-accounts
+    - name: 登录并自动选择组织和空间
       run: |
-        # 获取所有账号相关的变量
-        accounts=()
-        i=1
-        while true; do
-          email_var="ACCOUNT${i}_EMAIL"
-          password_var="ACCOUNT${i}_PASSWORD"
-          
-          # 检查变量是否存在
-          if [ -n "${!email_var}" ] && [ -n "${!password_var}" ]; then
-            accounts+=("$i")
-            echo "发现账号 $i: ${!email_var}"
-            i=$((i+1))
-          else
-            break
-          fi
-        done
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
+        SELECTED_ORG=$(cf orgs | awk 'NR>3 {print $1; exit}')
+        if [ -z "$SELECTED_ORG" ]; then echo "错误：未找到可用组织"; exit 1; fi
+        cf target -o "$SELECTED_ORG"
+        SELECTED_SPACE=$(cf spaces | awk 'NR>3 {print $1; exit}')
+        if [ -z "$SELECTED_SPACE" ]; then echo "错误：未找到可用空间"; exit 1; fi
+        cf target -s "$SELECTED_SPACE"
+        echo "将从 组织: $SELECTED_ORG / 空间: $SELECTED_SPACE 中删除应用"
+
+    - name: 获取并删除所有应用
+      run: |
+        # 这里是修正后的关键部分，确保 awk 语句有完整的单引号
+        apps=$(cf apps | awk 'NR>3 {print $1}')
         
-        if [ ${#accounts[@]} -eq 0 ]; then
-          echo "错误：未找到任何账号配置"
-          exit 1
+        if [ -z "$apps" ]; then
+          echo "在区域 ${{ github.event.inputs.region }} 中未找到任何应用，无需删除。"
+          exit 0
         fi
         
-        echo "找到 ${#accounts[@]} 个账号: ${accounts[*]}"
-        echo "accounts=${accounts[*]}" >> $GITHUB_OUTPUT
-
-    - name: 处理账号选择
-      id: select-accounts
-      run: |
-        all_accounts=(${{ steps.get-accounts.outputs.accounts }})
-        user_input="${{ github.event.inputs.account_selection }}"
+        echo "发现以下应用，将全部删除:"
+        echo "$apps"
         
-        # 如果输入是 "all"，选择所有账号
-        if [ "$user_input" = "all" ]; then
-          selected_accounts=("${all_accounts[@]}")
-          echo "选择了所有账号: ${selected_accounts[*]}"
-        else
-          # 处理用户输入的账号编号（支持逗号分隔或空格分隔）
-          IFS=', ' read -ra user_selected <<< "$user_input"
-          selected_accounts=()
-          
-          for account_num in "${user_selected[@]}"; do
-            # 验证账号编号是否有效
-            if [[ " ${all_accounts[@]} " =~ " ${account_num} " ]]; then
-              selected_accounts+=("$account_num")
-            else
-              echo "警告：账号 $account_num 不存在，已跳过"
-            fi
-          done
-          
-          if [ ${#selected_accounts[@]} -eq 0 ]; then
-            echo "错误：没有选择有效的账号"
-            exit 1
-          fi
-          
-          echo "选择的账号: ${selected_accounts[*]}"
-        fi
-        
-        echo "selected_accounts=${selected_accounts[*]}" >> $GITHUB_OUTPUT
-
-    - name: 循环处理每个账号
-      env:
-        ACCOUNT1_EMAIL: ${{ vars.ACCOUNT1_EMAIL }}
-        ACCOUNT1_PASSWORD: ${{ vars.ACCOUNT1_PASSWORD }}
-        ACCOUNT2_EMAIL: ${{ vars.ACCOUNT2_EMAIL }}
-        ACCOUNT2_PASSWORD: ${{ vars.ACCOUNT2_PASSWORD }}
-        ACCOUNT3_EMAIL: ${{ vars.ACCOUNT3_EMAIL }}
-        ACCOUNT3_PASSWORD: ${{ vars.ACCOUNT3_PASSWORD }}
-        ACCOUNT4_EMAIL: ${{ vars.ACCOUNT4_EMAIL }}
-        ACCOUNT4_PASSWORD: ${{ vars.ACCOUNT4_PASSWORD }}
-        ACCOUNT5_EMAIL: ${{ vars.ACCOUNT5_EMAIL }}
-        ACCOUNT5_PASSWORD: ${{ vars.ACCOUNT5_PASSWORD }}
-      run: |
-        selected_accounts=(${{ steps.select-accounts.outputs.selected_accounts }})
-        
-        echo "========================================"
-        echo "开始处理选中的账号: ${selected_accounts[*]}"
-        echo "区域: ${{ github.event.inputs.region }}"
-        echo "========================================"
-        
-        for account_num in "${selected_accounts[@]}"; do
-          email_var="ACCOUNT${account_num}_EMAIL"
-          password_var="ACCOUNT${account_num}_PASSWORD"
-          
-          email="${!email_var}"
-          password="${!password_var}"
-          
-          echo "========================================"
-          echo "开始处理账号 $account_num: $email"
-          echo "========================================"
-          
-          # 登录并自动选择组织和空间
-          cf login -a ${{ env.CF_API }} -u "$email" -p "$password" || {
-            echo "错误：账号 $account_num 登录失败"
-            continue
-          }
-          
-          SELECTED_ORG=$(cf orgs | awk 'NR>3 {print $1; exit}')
-          if [ -z "$SELECTED_ORG" ]; then 
-            echo "警告：账号 $account_num 未找到可用组织，跳过"
-            continue
-          fi
-          
-          cf target -o "$SELECTED_ORG"
-          SELECTED_SPACE=$(cf spaces | awk 'NR>3 {print $1; exit}')
-          if [ -z "$SELECTED_SPACE" ]; then 
-            echo "警告：账号 $account_num 未找到可用空间，跳过"
-            continue
-          fi
-          
-          cf target -s "$SELECTED_SPACE"
-          echo "将从 账号$account_num / 组织: $SELECTED_ORG / 空间: $SELECTED_SPACE 中删除应用"
-          
-          # 获取并删除所有应用
-          apps=$(cf apps | awk 'NR>3 {print $1}')
-          
-          if [ -z "$apps" ]; then
-            echo "账号 $account_num 在区域 ${{ github.event.inputs.region }} 中未找到任何应用，无需删除。"
-            continue
-          fi
-          
-          echo "发现以下应用，将全部删除:"
-          echo "$apps"
-          
-          # 循环删除每个应用
-          for app in $apps; do
-            echo "----------------------------------------"
-            echo "正在删除应用: $app"
-            # 使用 -f 强制删除，-r 同时删除关联的路由
-            cf delete -f -r "$app" && echo "应用 $app 删除成功。" || echo "应用 $app 删除失败"
-          done
-          
-          echo "账号 $account_num 处理完成"
+        # 循环删除每个应用
+        for app in $apps; do
           echo "----------------------------------------"
-          
-          # 登出当前账号
-          cf logout
+          echo "正在删除应用: $app"
+          # 使用 -f 强制删除，-r 同时删除关联的路由
+          cf delete -f -r "$app"
+          echo "应用 $app 删除成功。"
         done
 
-    - name: 完成总结
+    - name: 最终验证
       run: |
-        echo "========================================"
-        echo "所有选中账号的处理已完成"
-        echo "区域: ${{ github.event.inputs.region }}"
-        echo "处理的账号: ${{ github.event.inputs.account_selection }}"
-        echo "========================================"
+        echo "----------------------------------------"
+        echo "删除操作完成。验证区域 ${{ github.event.inputs.region }} 中剩余的应用:"
+        cf apps
