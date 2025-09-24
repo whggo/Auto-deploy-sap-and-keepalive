@@ -2,56 +2,35 @@ name: 自动保活 SAP
 
 on:
   schedule:
-    - cron: '45 23 * * *'      
+    - cron: '55 23 * * *'      
   workflow_dispatch:          # 允许手动触发
 
 jobs:
-  process-all-accounts:
+  restart-sg-apps:
     runs-on: ubuntu-latest
-    name: 处理所有账号
-    strategy:
-      matrix:
-        # 动态生成账号矩阵，最多支持10个账号
-        account: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    name: 重启新加坡(SG)区域应用
+    if: always()
     continue-on-error: true
     timeout-minutes: 120 
     steps:
-    - name: 检查账号是否存在
-      id: check_account
-      run: |
-        account_num=${{ matrix.account }}
-        email_var="ACCOUNT${account_num}_EMAIL"
-        password_var="ACCOUNT${account_num}_PASSWORD"
-        
-        # 检查变量是否存在
-        if [ -n "${!email_var}" ] && [ -n "${!password_var}" ]; then
-          echo "账号 $account_num 存在，继续处理"
-          echo "account_exists=true" >> $GITHUB_OUTPUT
-          echo "email=${!email_var}" >> $GITHUB_OUTPUT
-          echo "password=${!password_var}" >> $GITHUB_OUTPUT
-        else
-          echo "账号 $account_num 不存在，跳过"
-          echo "account_exists=false" >> $GITHUB_OUTPUT
-        fi
-
     - name: 检出代码
-      if: steps.check_account.outputs.account_exists == 'true'
       uses: actions/checkout@v4
 
     - name: 安装 CF CLI
-      if: steps.check_account.outputs.account_exists == 'true'
       run: |
         wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
         echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
         sudo apt-get update
         sudo apt-get install -y cf8-cli
 
-    - name: 处理SG区域应用
-      if: steps.check_account.outputs.account_exists == 'true'
+    - name: 设置 SG 区域 API 端点
       run: |
-        echo "开始处理账号 ${{ matrix.account }} 的新加坡(SG)区域应用"
-        cf login -a "https://api.cf.ap21.hana.ondemand.com" -u "${{ steps.check_account.outputs.email }}" -p "${{ steps.check_account.outputs.password }}"
-        
+        echo "CF_API=https://api.cf.ap21.hana.ondemand.com" >> $GITHUB_ENV
+        echo "使用API端点: $CF_API (区域: SG)"
+
+    - name: 登录并自动检测组织和空间
+      run: |
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         echo "自动检测SG区域可用的组织和空间..."
         SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
         if [ -z "$SELECTED_ORG" ]; then echo "错误: 未找到可用的组织"; exit 1; fi
@@ -62,45 +41,46 @@ jobs:
         echo "当前SG区域目标:"
         cf target
 
-        # 等待UTC 00:00（仅定时任务）
-        if [[ "${{ github.event_name }}" == "schedule" ]]; then
-          echo "等待 UTC 时间到达 00:00 以开始重启流程..."
-          target_time="00:00"
-          deadline_time="01:00"
+    - name: '[仅定时任务] 等待 UTC 00:00 开始任务'
+      if: github.event_name == 'schedule'
+      run: |
+        echo "等待 UTC 时间到达 00:00 以开始重启流程..."
+        target_time="00:00"
+        deadline_time="01:00"
 
-          while true; do
-            date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
-            if [ -z "$date_header" ]; then
-              echo "无法获取 ntp.org 时间，15秒后重试..."
-              sleep 15
-              continue
-            fi
+        while true; do
+          date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
+          if [ -z "$date_header" ]; then
+            echo "无法获取 ntp.org 时间，15秒后重试..."
+            sleep 15
+            continue
+          fi
 
-            current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
-            current_hour=$(echo "$current_time" | cut -c 1-2)
-            
-            if [[ "$current_hour" == "23" ]]; then
-              echo "等待午夜... 当前 UTC 时间: $current_time"
-              sleep 60
-              continue
-            fi
-
-            if [[ "$current_time" > "$deadline_time" ]]; then
-              echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
-              exit 1
-            fi
-
-            if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
-              echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
-              break
-            fi
-            
-            echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
+          current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
+          current_hour=$(echo "$current_time" | cut -c 1-2)
+          
+          if [[ "$current_hour" == "23" ]]; then
+            echo "等待午夜... 当前 UTC 时间: $current_time"
             sleep 60
-          done
-        fi
+            continue
+          fi
 
-        # 处理应用
+          if [[ "$current_time" > "$deadline_time" ]]; then
+            echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
+            exit 1
+          fi
+
+          if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
+            echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
+            break
+          fi
+          
+          echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
+          sleep 60
+        done
+
+    - name: 等待应用自行停止后，再尝试启动(直至成功)
+      run: |
         apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
         if [ -z "$apps" ]; then
           echo "在SG区域中未发现任何应用，无需操作。"
@@ -158,15 +138,38 @@ jobs:
         done
 
         echo "----------------------------------------"
-        echo "成功: 账号 ${{ matrix.account }} SG区域所有应用均已处理完毕。"
+        echo "成功: SG区域所有应用均已处理完毕。"
+
+    - name: 验证最终应用状态
+      run: |
+        echo "验证SG区域最终应用状态..."
         cf apps
 
-    - name: 处理US区域应用
-      if: steps.check_account.outputs.account_exists == 'true'
+  restart-us-apps:
+    runs-on: ubuntu-latest
+    name: 重启美国(US)区域应用
+    if: always()
+    continue-on-error: true
+    timeout-minutes: 120 # 
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 安装 CF CLI
       run: |
-        echo "开始处理账号 ${{ matrix.account }} 的美国(US)区域应用"
-        cf login -a "https://api.cf.us10-001.hana.ondemand.com" -u "${{ steps.check_account.outputs.email }}" -p "${{ steps.check_account.outputs.password }}"
-        
+        wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+        echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+        sudo apt-get update
+        sudo apt-get install -y cf8-cli
+
+    - name: 设置 US 区域 API 端点
+      run: |
+        echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+        echo "使用API端点: $CF_API (区域: US)"
+
+    - name: 登录并自动检测组织和空间
+      run: |
+        cf login -a ${{ env.CF_API }} -u "${{ secrets.EMAIL }}" -p "${{ secrets.PASSWORD }}"
         echo "自动检测US区域可用的组织和空间..."
         SELECTED_ORG=$(cf orgs | grep -v "^name$" | grep -v "^Getting orgs" | grep -v "^$" | head -n 1 | awk '{print $1}')
         if [ -z "$SELECTED_ORG" ]; then echo "错误: 未找到可用的组织"; exit 1; fi
@@ -177,45 +180,46 @@ jobs:
         echo "当前US区域目标:"
         cf target
 
-        # 等待UTC 00:00（仅定时任务）
-        if [[ "${{ github.event_name }}" == "schedule" ]]; then
-          echo "等待 UTC 时间到达 00:00 以开始重启流程..."
-          target_time="00:00"
-          deadline_time="01:00"
+    - name: '[仅定时任务] 等待 UTC 00:00 开始任务'
+      if: github.event_name == 'schedule'
+      run: |
+        echo "等待 UTC 时间到达 00:00 以开始重启流程..."
+        target_time="00:00"
+        deadline_time="01:00"
 
-          while true; do
-            date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
-            if [ -z "$date_header" ]; then
-              echo "无法获取 ntp.org 时间，15秒后重试..."
-              sleep 15
-              continue
-            fi
+        while true; do
+          date_header=$(curl -sI https://www.ntp.org/ | grep -i '^date:')
+          if [ -z "$date_header" ]; then
+            echo "无法获取 ntp.org 时间，15秒后重试..."
+            sleep 15
+            continue
+          fi
 
-            current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
-            current_hour=$(echo "$current_time" | cut -c 1-2)
-            
-            if [[ "$current_hour" == "23" ]]; then
-              echo "等待午夜... 当前 UTC 时间: $current_time"
-              sleep 60
-              continue
-            fi
-
-            if [[ "$current_time" > "$deadline_time" ]]; then
-              echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
-              exit 1
-            fi
-
-            if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
-              echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
-              break
-            fi
-            
-            echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
+          current_time=$(echo "$date_header" | awk '{print $6}' | cut -c 1-5)
+          current_hour=$(echo "$current_time" | cut -c 1-2)
+          
+          if [[ "$current_hour" == "23" ]]; then
+            echo "等待午夜... 当前 UTC 时间: $current_time"
             sleep 60
-          done
-        fi
+            continue
+          fi
 
-        # 处理应用
+          if [[ "$current_time" > "$deadline_time" ]]; then
+            echo "错误：已超过安全时间窗口 ($deadline_time UTC)。"
+            exit 1
+          fi
+
+          if [[ "$current_time" > "$target_time" || "$current_time" == "$target_time" ]]; then
+            echo "时间到达或超过 00:00 UTC (北京时间 08:00)，开始执行重启任务。"
+            break
+          fi
+          
+          echo "时间未到 (当前 $current_time)，将在 1 分钟后再次检查..."
+          sleep 60
+        done
+
+    - name: 等待应用自行停止后，再尝试启动(直至成功)
+      run: |
         apps=$(cf apps | awk 'NR>3 {print $1}' | grep -v '^$')
         if [ -z "$apps" ]; then
           echo "在US区域中未发现任何应用，无需操作。"
@@ -263,7 +267,7 @@ jobs:
             ((attempt++))
           done
 
-          # 输出应用URL
+          # 步骤 3: 输出应用URL
           app_url=$(cf app "$app" | grep "urls:" | awk '{print $2}')
           if [ -n "$app_url" ]; then
             echo "应用 $app 的访问地址是: $app_url"
@@ -271,5 +275,9 @@ jobs:
         done
 
         echo "----------------------------------------"
-        echo "成功: 账号 ${{ matrix.account }} US区域所有应用均已处理完毕。"
+        echo "成功: US区域所有应用均已处理完毕。"
+
+    - name: 验证最终应用状态
+      run: |
+        echo "验证US区域最终应用状态..."
         cf apps
